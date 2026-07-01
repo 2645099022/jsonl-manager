@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Claude Code 会话管理</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}?v=search-opt-20260613">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">◇</span>
+      <span class="title">Claude Code 会话管理</span>
+    </div>
+    <div class="meta">
+      <span class="muted">projects:</span>
+      <code class="path">{{ projects_dir }}</code>
+      <button id="btn-refresh" class="btn-ghost" title="刷新">↻</button>
+      <button id="btn-recycle-settings" class="btn-ghost recycle-settings-btn" title="回收站" aria-label="回收站">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M3 6h18" />
+          <path d="M8 6V4h8v2" />
+          <path d="M6 6l1 15h10l1-15" />
+          <path d="M10 11v6" />
+          <path d="M14 11v6" />
+        </svg>
+      </button>
+      <button id="btn-rollback" class="btn-ghost rollback-settings-btn" title="回档" aria-label="回档">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M4 7h10a6 6 0 1 1-4.2 10.2" />
+          <path d="M4 7l4-4" />
+          <path d="M4 7l4 4" />
+          <path d="M12 9v4l3 2" />
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- 项目 + 会话列表 -->
+    <aside class="col col-projects">
+      <div class="col-header">
+        <h2>项目</h2>
+        <span class="counter" id="project-count">—</span>
+      </div>
+      <ul id="project-list" class="list"></ul>
+
+      <div class="col-header">
+        <h2>会话</h2>
+        <span class="counter" id="session-count">—</span>
+      </div>
+      <div class="search">
+        <input id="session-filter" type="text" placeholder="按标题/ID 过滤">
+        <button id="global-search-toggle" type="button" title="全局搜索对话内容" aria-pressed="false">全局</button>
+      </div>
+      <ul id="session-list" class="list sessions"></ul>
+    </aside>
+
+    <!-- 分支侧栏 -->
+    <aside class="col col-branches">
+      <div class="col-header">
+        <h2>分支</h2>
+        <span class="counter" id="branch-count">—</span>
+      </div>
+      <p class="hint" id="branch-hint">
+        每条分支对应一次完整对话。<b class="tag-rewind-inline">回滚</b> 标记表示 rewind 后保留下来的旧分支。
+      </p>
+      <div id="branch-tree" class="branch-tree"></div>
+    </aside>
+
+    <!-- 消息详情 -->
+    <section class="col col-messages">
+      <div id="session-header" class="session-header empty">
+        <div class="placeholder">从左侧选择一个会话开始查看</div>
+      </div>
+      <div id="messages" class="messages"></div>
+    </section>
+  </main>
+
+  <dialog id="delete-dialog" class="modal">
+    <form method="dialog" class="modal-panel">
+      <div class="modal-head">
+        <h3>删除会话</h3>
+      </div>
+      <p class="modal-copy">确定要把这个会话移入回收站吗？</p>
+      <div class="modal-target" id="delete-target"></div>
+      <div class="modal-actions">
+        <button id="delete-cancel" class="modal-btn secondary" value="cancel">取消</button>
+        <button id="delete-confirm" class="modal-btn danger" value="default">移入回收站</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="recycle-dialog" class="modal">
+    <form method="dialog" class="modal-panel settings-panel">
+      <div class="modal-head">
+        <h3>回收站设置</h3>
+      </div>
+      <label class="field-row" for="recycle-max">
+        <span>最多保留会话</span>
+        <input id="recycle-max" type="number" min="1" max="1000" value="30">
+      </label>
+      <p class="modal-copy">当前回收站中有 <b id="recycle-count">0</b> 个会话。超过上限时会彻底删除最早移入的会话。</p>
+      <div class="recycle-list-wrap">
+        <div class="recycle-list-head">已删除会话</div>
+        <div id="recycle-list" class="recycle-list">
+          <div class="recycle-empty">回收站为空</div>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="recycle-cancel" class="modal-btn secondary" value="cancel">取消</button>
+        <button id="recycle-save" class="modal-btn primary" value="default">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+
+  <dialog id="rollback-dialog" class="modal">
+    <form method="dialog" class="modal-panel settings-panel">
+      <div class="modal-head">
+        <h3>回档</h3>
+      </div>
+      <p class="modal-copy">这里保存了已回档的会话，点击还原即可放回原项目。</p>
+      <div class="recycle-list-wrap">
+        <div class="recycle-list-head">已回档会话</div>
+        <div id="rollback-list" class="recycle-list">
+          <div class="recycle-empty">暂无回档会话</div>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="rollback-close" class="modal-btn secondary" value="cancel">关闭</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="{{ url_for('static', filename='js/app.js') }}?v=search-opt-20260613"></script>
+</body>
+</html>
