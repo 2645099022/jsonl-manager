@@ -23,6 +23,28 @@ def _projects_dir() -> Path:
     return Path(app.config.get("PROJECTS_DIR", PROJECTS_DIR))
 
 
+@app.after_request
+def _log_session_detail_timing(response):
+    """调试: 切会话接口的耗时日志. 仅 /api/.../sessions/<sid> 触发, 打印到 stderr."""
+    import time
+    import sys
+    from flask import g
+    t0 = getattr(g, "_sd_t_total0", None)
+    t_parse = getattr(g, "_sd_t_parse_done", None)
+    if t0 is None or t_parse is None:
+        return response
+    t_done = time.perf_counter()
+    sys.stderr.write(
+        f"[jsonl-manager][detail] total={(t_done-t0)*1000:.1f}ms "
+        f"parse={(t_parse-t0)*1000:.1f}ms build={(t_done-t_parse)*1000:.1f}ms "
+        f"nodes={getattr(g, '_sd_node_count', '?')} "
+        f"branches={getattr(g, '_sd_branch_count', '?')} "
+        f"-> {response.status_code}\n"
+    )
+    sys.stderr.flush()
+    return response
+
+
 @app.route("/")
 def index():
     return render_template(
@@ -144,9 +166,15 @@ def api_rollback_session(project_id: str, session_id: str):
 
 @app.route("/api/projects/<project_id>/sessions/<session_id>")
 def api_session_detail(project_id: str, session_id: str):
+    import time
+    from flask import g
+    g._sd_t_total0 = time.perf_counter()
     session = session_parser.load_session(project_id, session_id, _projects_dir())
     if session is None:
         abort(404)
+    g._sd_t_parse_done = time.perf_counter()
+    g._sd_node_count = len(session.nodes)
+    g._sd_branch_count = len(session.branches)
 
     branch_id = request.args.get("branch")
     branches = session.branches

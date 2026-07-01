@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -58,6 +59,8 @@ class Node:
     raw: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
+        # raw 字段不返回: 前端从未使用 (n.raw 在 static/js/app.js 0 引用),
+        # 但每个 node 都跟着占大量带宽. 想看原 jsonl 调 /api/.../raw
         return {
             "uuid": self.uuid,
             "parent_uuid": self.parent_uuid,
@@ -73,7 +76,6 @@ class Node:
             "is_tool_result": self.is_tool_result,
             "is_failed_retry": self.is_failed_retry,
             "model": self.model,
-            "raw": self.raw,
         }
 
 
@@ -1410,8 +1412,37 @@ def list_sessions(project_id: str, projects_dir: Path = DEFAULT_PROJECTS_DIR) ->
     return summaries
 
 
+# LRU 缓存: 键 = (pid, sid, mtime, size). 文件改动时 mtime/size 必变, 自动失效.
+_SESSION_CACHE: OrderedDict = OrderedDict()
+_SESSION_CACHE_MAX = 64
+
+
 def load_session(project_id: str, session_id: str, projects_dir: Path = DEFAULT_PROJECTS_DIR) -> Session | None:
     f = projects_dir / project_id / f"{session_id}.jsonl"
     if not f.exists():
         return None
-    return parse_session_file(f, project_id)
+    try:
+        stat = f.stat()
+        key = (project_id, session_id, stat.st_mtime, stat.st_size)
+    except OSError:
+        return parse_session_file(f, project_id)
+
+    cached = _SESSION_CACHE.get(key)
+    if cached is not None:
+        _SESSION_CACHE.move_to_end(key)
+        return cached
+
+    session = parse_session_file(f, project_id)
+    _SESSION_CACHE[key] = session
+    # 同 (pid, sid) 的旧键清掉 (mtime 变了)
+    stale = [k for k in _SESSION_CACHE if k[0] == project_id and k[1] == session_id and k != key]
+    for k in stale:
+        _SESSION_CACHE.pop(k, None)
+    while len(_SESSION_CACHE) > _SESSION_CACHE_MAX:
+        _SESSION_CACHE.popitem(last=False)
+    return session
+
+
+def clear_session_cache() -> None:
+    """测试或管理用: 清空会话缓存."""
+    _SESSION_CACHE.clear()

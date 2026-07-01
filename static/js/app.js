@@ -402,6 +402,7 @@ async function restoreRollbackSession(rollbackId) {
 }
 
 async function loadSessionDetail(pid, sid, branchId = null) {
+  const _t0 = performance.now();
   // 切走前先记下当前分支的滚动位置 (按 sid+branchId 独立保存)
   const prev = state.currentDetail?.selected_branch;
   if (prev) {
@@ -414,12 +415,27 @@ async function loadSessionDetail(pid, sid, branchId = null) {
 
   const url = `/api/projects/${encodeURIComponent(pid)}/sessions/${encodeURIComponent(sid)}` +
               (branchId ? `?branch=${encodeURIComponent(branchId)}` : '');
+  const _tFetchStart = performance.now();
   const r = await fetchJson(url);
+  const _tFetchEnd = performance.now();
   state.currentDetail = r;
   state.selectedBranch = r.selected_branch?.branch_id || null;
+  const _tBrStart = performance.now();
   renderBranches();
+  const _tBrEnd = performance.now();
+  const _tMsgStart = performance.now();
   renderMessages();
+  const _tMsgEnd = performance.now();
   renderSessionHeader();
+  console.log(
+    `[jsonl-manager][detail] sid=${sid.slice(0,8)} ` +
+    `fetch=${(_tFetchEnd-_tFetchStart).toFixed(1)}ms ` +
+    `branches=${(_tBrEnd-_tBrStart).toFixed(1)}ms ` +
+    `messages=${(_tMsgEnd-_tMsgStart).toFixed(1)}ms ` +
+    `total=${(_tMsgEnd-_t0).toFixed(1)}ms ` +
+    `nodes=${(r.nodes||[]).length} ` +
+    `forks_at=${Object.keys(r.forks_at||{}).length}`
+  );
 
   const newKey = r.selected_branch
     ? `${state.currentSession}::${r.selected_branch.branch_id}`
