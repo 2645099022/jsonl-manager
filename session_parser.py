@@ -13,8 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
-import subprocess
+import sqlite3
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -30,8 +29,20 @@ RECYCLE_CONFIG_FILE = "config.json"
 DEFAULT_RECYCLE_MAX = 30
 ROLLBACK_DIR_NAME = ".jsonl-manager-rollback"
 ROLLBACK_INDEX_FILE = "sessions.json"
-EVERYTHING_DIR = Path(os.environ.get("JSONL_MANAGER_EVERYTHING_DIR", r"E:\Everything"))
-EVERYTHING_SEARCH_LIMIT = 80
+# 全局搜索: SQLite FTS5 trigram 持久化索引 (替代原 Everything 外部依赖)
+INDEX_DIR_NAME = ".jsonl-manager-index"
+INDEX_DB_FILE = "index.db"
+SEARCH_LIMIT = 80
+# trigram 分词器最短索引单位是 3 字符; 更短的 query 走 LIKE 兜底
+FTS_MIN_CHARS = 3
+# 每个会话最多返回几条命中, 避免单会话刷屏
+MAX_MATCHES_PER_SESSION = 3
+# 增量同步节流: 逐键搜索时不必每次都扫盘 (rglob+stat 几百 ms), 同一索引 N 秒内最多同步一次
+SYNC_THROTTLE_SEC = 2.0
+# 每个索引上次同步的时间戳 (进程级, 按 db 路径区分)
+_INDEX_LAST_SYNC: dict[str, float] = {}
+# 保留旧名, 供可能的外部引用 (值向后兼容)
+EVERYTHING_SEARCH_LIMIT = SEARCH_LIMIT
 # 应用级配置 (独立于任一 projects_dir, 用于记忆最近打开的 projects 根目录)
 APP_CONFIG_DIR = Path(os.environ.get("USERPROFILE", os.path.expanduser("~"))) / ".jsonl-manager"
 APP_CONFIG_FILE = APP_CONFIG_DIR / "config.json"
@@ -1236,96 +1247,6 @@ def restore_rollback_session(rollback_id: str, projects_dir: Path = DEFAULT_PROJ
     }
 
 
-def _everything_es_path() -> Path | None:
-    configured = EVERYTHING_DIR / "es.exe"
-    if configured.exists():
-        return configured
-    found = shutil.which("es.exe") or shutil.which("es")
-    return Path(found) if found else None
-
-
-def _everything_exe_path() -> Path | None:
-    configured = EVERYTHING_DIR / "Everything.exe"
-    if configured.exists():
-        return configured
-    found = shutil.which("Everything.exe") or shutil.which("Everything")
-    return Path(found) if found else None
-
-
-def _everything_ipc_ready(es: Path | None = None) -> bool:
-    es = es or _everything_es_path()
-    if not es:
-        return False
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    try:
-        proc = subprocess.run(
-            [str(es), "-get-everything-version"],
-            cwd=str(es.parent),
-            capture_output=True,
-            text=True,
-            timeout=1.5,
-            creationflags=flags,
-        )
-        return proc.returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-
-
-def _start_everything(es: Path | None = None) -> bool:
-    exe = _everything_exe_path()
-    if not exe:
-        return False
-
-    try:
-        os.startfile(str(exe))  # type: ignore[attr-defined]
-    except OSError:
-        try:
-            subprocess.Popen(
-                [str(exe)],
-                cwd=str(exe.parent),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
-            )
-        except OSError:
-            return False
-
-    deadline = time.time() + 12.0
-    while time.time() < deadline:
-        if _everything_ipc_ready(es):
-            return True
-        time.sleep(0.35)
-    return False
-
-
-def _ensure_everything_ready(es: Path) -> tuple[bool, str | None]:
-    if _everything_ipc_ready(es):
-        return True, None
-    if _start_everything(es):
-        return True, None
-    return False, "Everything IPC 不可用，请确认 Everything.exe 能正常打开"
-
-
-def _everything_query_literal(query: str) -> str:
-    cleaned = re.sub(r"[\x00-\x1f]+", " ", query).strip()
-    cleaned = cleaned[:200].replace('"', " ")
-    return f'content:"{cleaned}"'
-
-
-def _run_everything_command(args: list[str], es: Path, timeout: int = 15) -> subprocess.CompletedProcess[str]:
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    return subprocess.run(
-        [str(es), *args],
-        cwd=str(es.parent),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=timeout,
-        creationflags=flags,
-    )
-
-
 def _is_searchable_session_file(path: Path, projects_dir: Path) -> bool:
     if path.suffix.lower() != ".jsonl":
         return False
@@ -1336,33 +1257,14 @@ def _is_searchable_session_file(path: Path, projects_dir: Path) -> bool:
     if len(rel.parts) != 2:
         return False
     project_id, filename = rel.parts
-    if project_id in {RECYCLE_DIR_NAME, ROLLBACK_DIR_NAME, "subagents"}:
+    if project_id in {RECYCLE_DIR_NAME, ROLLBACK_DIR_NAME, INDEX_DIR_NAME, "subagents"}:
         return False
     if filename.startswith("agent-"):
         return False
     return bool(SESSION_FILE_RE.match(path.stem))
 
 
-def _everything_files_from_output(output: str, projects_dir: Path, limit: int) -> list[Path]:
-    files: list[Path] = []
-    seen: set[Path] = set()
-    for line in (output or "").splitlines():
-        raw = line.strip().strip('"')
-        if not raw:
-            continue
-        path = Path(raw)
-        if not _is_searchable_session_file(path, projects_dir):
-            continue
-        resolved = path.resolve()
-        if resolved not in seen:
-            seen.add(resolved)
-            files.append(path)
-        if len(files) >= limit:
-            break
-    return files
-
-
-def _filesystem_jsonl_files(projects_dir: Path, limit: int = 5000) -> list[Path]:
+def _filesystem_jsonl_files(projects_dir: Path, limit: int = 100000) -> list[Path]:
     if not projects_dir.exists():
         return []
     files: list[Path] = []
@@ -1372,88 +1274,7 @@ def _filesystem_jsonl_files(projects_dir: Path, limit: int = 5000) -> list[Path]
         files.append(path)
         if len(files) >= limit:
             break
-    files.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
     return files
-
-
-def _run_everything_file_query(
-    projects_dir: Path,
-    limit: int,
-    query: str | None = None,
-    use_content: bool = False,
-) -> tuple[list[Path], str | None]:
-    es = _everything_es_path()
-    if not es:
-        return [], f"未找到 Everything CLI：{EVERYTHING_DIR / 'es.exe'}"
-
-    ready, ready_error = _ensure_everything_ready(es)
-    if not ready:
-        return [], ready_error
-
-    limit = max(1, min(int(limit or EVERYTHING_SEARCH_LIMIT), 5000))
-    search_terms = ["ext:jsonl"]
-    if query:
-        search_terms.append(_everything_query_literal(query) if use_content else query)
-
-    args = [
-        "-n",
-        str(limit),
-        "-full-path-and-name",
-        "-sort",
-        "date-modified-descending",
-        "-path",
-        str(projects_dir),
-        *search_terms,
-    ]
-
-    try:
-        proc = _run_everything_command(args, es)
-    except subprocess.TimeoutExpired:
-        return [], "Everything 搜索超时"
-    except OSError as exc:
-        return [], f"Everything CLI 启动失败：{exc}"
-
-    if proc.returncode == 8:
-        ready, ready_error = _ensure_everything_ready(es)
-        if not ready:
-            return [], ready_error
-        try:
-            proc = _run_everything_command(args, es)
-        except subprocess.TimeoutExpired:
-            return [], "Everything 已启动，但搜索仍然超时"
-        except OSError as exc:
-            return [], f"Everything CLI 启动失败：{exc}"
-
-    if proc.returncode not in (0, 1):
-        msg = (proc.stderr or proc.stdout or "").strip()
-        return [], msg or f"Everything 搜索失败，退出码 {proc.returncode}"
-
-    return _everything_files_from_output(proc.stdout, projects_dir, limit), None
-
-
-def _run_everything_query(query: str, projects_dir: Path, limit: int) -> tuple[list[Path], str | None]:
-    """
-    用 Everything 的 content 模式拿到"含有 query"的文件路径, 然后再并入整个 projects 目录
-    下的 jsonl 全量, 顺序按 mtime 倒序截断. 这样即使内容匹配没结果, 也能在
-    everything_search_sessions 阶段做按文本的兜底匹配.
-    """
-    files, error = _run_everything_file_query(projects_dir, limit * 3, query=query, use_content=True)
-    if error:
-        return _filesystem_jsonl_files(projects_dir), None
-
-    all_files, all_error = _run_everything_file_query(projects_dir, 5000)
-    if all_error and not files:
-        return _filesystem_jsonl_files(projects_dir), None
-
-    ordered: list[Path] = []
-    seen: set[Path] = set()
-    for path in [*files, *all_files]:
-        key = path.resolve()
-        if key in seen:
-            continue
-        seen.add(key)
-        ordered.append(path)
-    return ordered, None
 
 
 def _search_snippet(text: str, query: str, radius: int = 54) -> str:
@@ -1470,14 +1291,52 @@ def _search_snippet(text: str, query: str, radius: int = 54) -> str:
     return prefix + compact[start:end] + suffix
 
 
-def _search_matches_in_file(path: Path, query: str, max_matches: int = 3) -> list[dict]:
+# --------------------------------------------------------------------------- #
+# 全局搜索: SQLite FTS5 trigram 持久化索引
+#
+# 设计:
+# - 索引落盘在 <projects_dir>/.jsonl-manager-index/index.db, 每个根目录一套
+# - seg 表 (FTS5 trigram): 每条有正文的节点一行, 正文列直接存文本,
+#   查询时从索引取 snippet, 不再回读原 jsonl
+# - file 表: 记录每个 jsonl 的 mtime/size, 每次搜索前做增量同步
+#   (变化的文件删旧行重灌, 消失的文件清掉, 新文件灌入)
+# - query >= 3 字符走 FTS5 MATCH (亚毫秒); < 3 字符 trigram 无法索引, 走 LIKE 兜底
+# --------------------------------------------------------------------------- #
+
+
+def _index_db_path(projects_dir: Path) -> Path:
+    return projects_dir / INDEX_DIR_NAME / INDEX_DB_FILE
+
+
+def _open_index(projects_dir: Path) -> sqlite3.Connection:
+    db_path = _index_db_path(projects_dir)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS seg USING fts5("
+        "content, project_id UNINDEXED, session_id UNINDEXED, uuid UNINDEXED, "
+        "timestamp UNINDEXED, role UNINDEXED, title UNINDEXED, "
+        "tokenize='trigram')"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS file ("
+        "path TEXT PRIMARY KEY, project_id TEXT, session_id TEXT, "
+        "mtime REAL, size INTEGER)"
+    )
+    conn.commit()
+    return conn
+
+
+def _index_rows_for_file(path: Path) -> list[tuple]:
+    """解析单个 jsonl, 产出待写入 seg 的行 (content, pid, sid, uuid, ts, role, title)."""
     project_id = path.parent.name
     session_id = path.stem
-    matches: list[dict] = []
+    rows: list[tuple] = []
     title = ""
-    q = query.lower()
     try:
-        stat = path.stat()
         with path.open("r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 try:
@@ -1499,50 +1358,157 @@ def _search_matches_in_file(path: Path, query: str, max_matches: int = 3) -> lis
                         haystacks.append((text, "tool"))
 
                 for text, role in haystacks:
-                    if q not in text.lower():
-                        continue
-                    matches.append(
-                        {
-                            "project_id": project_id,
-                            "session_id": session_id,
-                            "title": title or session_id,
-                            "uuid": node.uuid,
-                            "timestamp": node.timestamp,
-                            "role": role,
-                            "snippet": _search_snippet(text, query),
-                            "mtime": stat.st_mtime,
-                            "file_size": stat.st_size,
-                        }
+                    rows.append(
+                        (text, project_id, session_id, node.uuid, node.timestamp, role, "")
                     )
-                    break
-                if len(matches) >= max_matches:
-                    break
     except OSError:
         return []
-    if not title:
-        for item in matches:
-            item["title"] = session_id
-    return matches
+    # 回填标题 (标题往往是首条 user 消息, 可能出现在部分行之后)
+    if title:
+        rows = [(r[0], r[1], r[2], r[3], r[4], r[5], title) for r in rows]
+    else:
+        rows = [(r[0], r[1], r[2], r[3], r[4], r[5], session_id) for r in rows]
+    return rows
 
 
-def everything_search_sessions(
+def _reindex_file(conn: sqlite3.Connection, path: Path) -> None:
+    """删除该文件的旧 seg 行并重灌, 更新 file 元信息."""
+    session_id = path.stem
+    project_id = path.parent.name
+    conn.execute(
+        "DELETE FROM seg WHERE project_id = ? AND session_id = ?",
+        (project_id, session_id),
+    )
+    rows = _index_rows_for_file(path)
+    if rows:
+        conn.executemany(
+            "INSERT INTO seg (content, project_id, session_id, uuid, timestamp, role, title) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+    try:
+        st = path.stat()
+        mtime, size = st.st_mtime, st.st_size
+    except OSError:
+        mtime, size = 0.0, 0
+    conn.execute(
+        "INSERT OR REPLACE INTO file (path, project_id, session_id, mtime, size) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (str(path), project_id, session_id, mtime, size),
+    )
+
+
+def _sync_index(conn: sqlite3.Connection, projects_dir: Path) -> int:
+    """增量同步: 只处理新增/变更/消失的文件. 返回改动的文件数."""
+    files = _filesystem_jsonl_files(projects_dir)
+    current = {str(p): p for p in files}
+    known: dict[str, tuple[float, int]] = {}
+    for row in conn.execute("SELECT path, mtime, size FROM file"):
+        known[row[0]] = (row[1] or 0.0, row[2] or 0)
+
+    changed = 0
+    # 消失的文件: 清 seg 与 file
+    for gone in set(known) - set(current):
+        p = Path(gone)
+        conn.execute(
+            "DELETE FROM seg WHERE project_id = ? AND session_id = ?",
+            (p.parent.name, p.stem),
+        )
+        conn.execute("DELETE FROM file WHERE path = ?", (gone,))
+        changed += 1
+
+    # 新增/变更: 比对 mtime+size
+    for spath, p in current.items():
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        prev = known.get(spath)
+        if prev and abs(prev[0] - st.st_mtime) < 1e-6 and prev[1] == st.st_size:
+            continue
+        _reindex_file(conn, p)
+        changed += 1
+
+    if changed:
+        conn.commit()
+    return changed
+
+
+def _fts_query(query: str) -> str:
+    """把 query 转成 FTS5 短语匹配 (整体作为字面短语, 避免特殊字符被当语法)."""
+    cleaned = re.sub(r'["\x00-\x1f]+', " ", query).strip()
+    return '"' + cleaned + '"'
+
+
+def search_sessions(
     query: str,
     projects_dir: Path = DEFAULT_PROJECTS_DIR,
-    limit: int = EVERYTHING_SEARCH_LIMIT,
+    limit: int = SEARCH_LIMIT,
+    force_sync: bool = False,
 ) -> dict:
     query = re.sub(r"\s+", " ", query or "").strip()
     if len(query) < 2:
         return {"query": query, "results": [], "count": 0, "available": True}
 
-    files, error = _run_everything_query(query, projects_dir, limit)
-    if error:
-        return {"query": query, "results": [], "count": 0, "available": False, "error": error}
+    try:
+        conn = _open_index(projects_dir)
+    except sqlite3.Error as exc:
+        return {"query": query, "results": [], "count": 0, "available": False,
+                "error": f"索引打开失败: {exc}"}
 
+    try:
+        # 节流: 逐键搜索时避免每次扫盘; 首次(未记录)或超过窗口或显式 force 才同步
+        db_key = str(_index_db_path(projects_dir))
+        now = time.monotonic()
+        last = _INDEX_LAST_SYNC.get(db_key)
+        if force_sync or last is None or (now - last) >= SYNC_THROTTLE_SEC:
+            _sync_index(conn, projects_dir)
+            _INDEX_LAST_SYNC[db_key] = time.monotonic()
+        limit = max(1, min(int(limit or SEARCH_LIMIT), 5000))
+        # 多取一些, 便于按会话去重截断后仍够 limit 条
+        row_budget = limit * MAX_MATCHES_PER_SESSION * 2
+        cols = "content, project_id, session_id, uuid, timestamp, role, title"
+        if len(query) >= FTS_MIN_CHARS:
+            sql = (f"SELECT {cols} FROM seg WHERE seg MATCH ? "
+                   f"ORDER BY rank LIMIT ?")
+            cur = conn.execute(sql, (_fts_query(query), row_budget))
+        else:
+            sql = (f"SELECT {cols} FROM seg WHERE content LIKE ? "
+                   f"LIMIT ?")
+            cur = conn.execute(sql, (f"%{query}%", row_budget))
+        raw = cur.fetchall()
+    except sqlite3.Error as exc:
+        conn.close()
+        return {"query": query, "results": [], "count": 0, "available": False,
+                "error": f"索引查询失败: {exc}"}
+    finally:
+        try:
+            conn.close()
+        except sqlite3.Error:
+            pass
+
+    q = query.lower()
+    per_session: dict[str, int] = {}
     results: list[dict] = []
-    for path in files:
-        results.extend(_search_matches_in_file(path, query))
-        if len(results) >= limit:
-            break
+    for content, pid, sid, uuid, ts, role, title in raw:
+        # FTS 短语匹配大小写不敏感, 这里再确认子串命中并定位 snippet
+        if q not in (content or "").lower():
+            continue
+        key = f"{pid}/{sid}"
+        if per_session.get(key, 0) >= MAX_MATCHES_PER_SESSION:
+            continue
+        per_session[key] = per_session.get(key, 0) + 1
+        results.append(
+            {
+                "project_id": pid,
+                "session_id": sid,
+                "title": title or sid,
+                "uuid": uuid,
+                "timestamp": ts,
+                "role": role,
+                "snippet": _search_snippet(content, query),
+            }
+        )
     results.sort(key=lambda r: r.get("timestamp") or "", reverse=True)
     return {
         "query": query,
@@ -1552,14 +1518,21 @@ def everything_search_sessions(
     }
 
 
+# 向后兼容: 保留旧函数名
+def everything_search_sessions(
+    query: str,
+    projects_dir: Path = DEFAULT_PROJECTS_DIR,
+    limit: int = SEARCH_LIMIT,
+) -> dict:
+    return search_sessions(query, projects_dir, limit)
+
+
 def list_projects(projects_dir: Path = DEFAULT_PROJECTS_DIR) -> list[dict]:
     if not projects_dir.exists():
         return []
     out: list[dict] = []
     for entry in sorted(projects_dir.iterdir()):
-        if entry.name == RECYCLE_DIR_NAME:
-            continue
-        if entry.name == ROLLBACK_DIR_NAME:
+        if entry.name in (RECYCLE_DIR_NAME, ROLLBACK_DIR_NAME, INDEX_DIR_NAME):
             continue
         if not entry.is_dir():
             continue

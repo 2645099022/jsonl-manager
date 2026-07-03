@@ -14,7 +14,7 @@
 - **失败请求识别**：API 错误后用户重发的同内容消息会自动标 `⚠ 失败请求`，与 rewind 区分开
 - **回收站（Recycle）**：会话移入回收站而非直接删除；可设置最多保留条数；一键还原
 - **回档（Archive）**：会话级"撤销"操作，把当前 jsonl 移动到 `.jsonl-manager-rollback/` 目录，随时还原
-- **Everything 全局搜索**：在 `es.exe` 可用时跨整个 projects 目录按对话内容搜，命中后高亮并可定位到原消息
+- **全局搜索**：内置 SQLite FTS5 全文索引，跨整个 projects 目录按对话内容搜，命中后高亮并可定位到原消息。零外部依赖，首次搜索建一次索引后查询毫秒级
 - 工具调用 / 工具结果用可折叠面板展示，输入输出一目了然
 - 按标题或会话 ID 即时过滤
 
@@ -23,7 +23,7 @@
 ```
 jsonl-manager/
 ├── app.py                  # Flask 入口与 API
-├── session_parser.py       # jsonl 解析、分支重建、回收站/回档/Everything 搜索
+├── session_parser.py       # jsonl 解析、分支重建、回收站/回档、FTS5 全文索引搜索
 ├── requirements.txt
 ├── run.bat / run.sh        # 启动脚本
 ├── templates/
@@ -54,13 +54,14 @@ run.bat
 
 打开浏览器访问 `http://127.0.0.1:5000` 即可。
 
-### Everything 集成（可选）
+### 全局搜索索引
 
-全局搜索功能依赖 [Everything](https://www.voidtools.com/) 命令行工具 `es.exe`。
+全局搜索使用 Python 内置 `sqlite3` 的 FTS5 全文索引，**无需任何外部程序**。
 
-- 默认从 `E:\Everything\es.exe` 读取；可通过环境变量 `JSONL_MANAGER_EVERYTHING_DIR` 改成其它路径
-- 也可把 `es.exe` 加入系统 `PATH`，工具会自动发现
-- Everything 未安装或未运行时，全局搜索按钮仍然可用，会回退到文件系统扫描
+- 索引落盘在 `<projects_dir>/.jsonl-manager-index/index.db`，每个 projects 根目录一套
+- 首次搜索时建索引（当前规模约数秒），之后查询毫秒级；重启不重建，只增量同步变化过的会话
+- 索引会自动包含对话正文与工具结果（命令输出/文件内容）
+- 查询 ≥3 字符走 FTS5，2 字符走 `LIKE` 兜底（trigram 分词器最短索引单位是 3 字符）
 
 ## API
 
@@ -72,7 +73,7 @@ run.bat
 | `GET /api/projects/<pid>/sessions/<sid>?branch=<id>` | | 指定分支的消息流 |
 | `GET /api/projects/<pid>/sessions/<sid>/tree` | | 全图节点 + 分支信息 |
 | `GET /api/projects/<pid>/sessions/<sid>/raw` | | 原始 jsonl |
-| `GET /api/search?q=<query>&limit=<n>` | | Everything 全局内容搜索 |
+| `GET /api/search?q=<query>&limit=<n>` | | FTS5 全局内容搜索 |
 | `GET /api/recycle` | | 回收站状态（条目、上限） |
 | `PUT /api/recycle/settings` | | 修改回收站最大保留数 `{"max_items": N}` |
 | `POST /api/recycle/<trash_id>/restore` | | 还原回收站中的会话 |

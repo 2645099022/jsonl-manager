@@ -646,7 +646,7 @@ function renderGlobalSearchResults() {
     return;
   }
   if (state.globalSearch.loading) {
-    ul.innerHTML = '<li class="empty-state">正在调用 Everything 搜索...</li>';
+    ul.innerHTML = '<li class="empty-state">正在检索索引...</li>';
     return;
   }
   if (state.globalSearch.error) {

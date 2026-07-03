@@ -96,10 +96,10 @@ def api_sessions(project_id: str):
 def api_search():
     query = request.args.get("q", "")
     try:
-        limit = int(request.args.get("limit", session_parser.EVERYTHING_SEARCH_LIMIT))
+        limit = int(request.args.get("limit", session_parser.SEARCH_LIMIT))
     except (TypeError, ValueError):
-        limit = session_parser.EVERYTHING_SEARCH_LIMIT
-    return jsonify(session_parser.everything_search_sessions(query, _projects_dir(), limit))
+        limit = session_parser.SEARCH_LIMIT
+    return jsonify(session_parser.search_sessions(query, _projects_dir(), limit))
 
 
 @app.route("/api/recycle", methods=["GET"])
