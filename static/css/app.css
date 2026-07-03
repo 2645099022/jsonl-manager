@@ -69,6 +69,21 @@ a { color: var(--accent); text-decoration: none; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.dir-select {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  max-width: 46vw;
+  cursor: pointer;
+  transition: border-color .15s;
+}
+.dir-select:hover { border-color: var(--border-strong); }
+.dir-select:focus { outline: none; border-color: var(--accent); }
+.dir-select option { background: var(--bg-elev-2); color: var(--text); }
 .btn-ghost {
   background: transparent;
   border: 1px solid var(--border);

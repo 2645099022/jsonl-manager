@@ -55,8 +55,30 @@ def index():
 
 @app.route("/api/config")
 def api_config():
-    """返回当前生效的 projects_dir, 供前端展示与 CLI --projects-dir 保持一致."""
-    return jsonify({"projects_dir": str(_projects_dir())})
+    """返回当前生效的 projects_dir 与最近打开过的根目录, 供前端下拉展示."""
+    return jsonify(
+        {
+            "projects_dir": str(_projects_dir()),
+            "recent_dirs": session_parser.list_recent_dirs(),
+        }
+    )
+
+
+@app.route("/api/config/projects-dir", methods=["PUT"])
+def api_set_projects_dir():
+    """运行时切换 projects 根目录, 并记入最近列表."""
+    data = request.get_json(silent=True) or {}
+    raw = (data.get("projects_dir") or "").strip()
+    if not raw:
+        return jsonify({"error": "projects_dir 不能为空"}), 400
+
+    new_dir = Path(raw).expanduser()
+    if not new_dir.exists() or not new_dir.is_dir():
+        return jsonify({"error": f"目录不存在: {new_dir}"}), 400
+
+    app.config["PROJECTS_DIR"] = str(new_dir)
+    recent = session_parser.record_recent_dir(new_dir)
+    return jsonify({"projects_dir": str(new_dir), "recent_dirs": recent})
 
 
 @app.route("/api/projects")
@@ -329,6 +351,8 @@ def main():
     if not pdir.exists():
         print(f"[警告] projects 目录不存在: {pdir}")
     app.config["PROJECTS_DIR"] = str(pdir)
+    if pdir.exists():
+        session_parser.record_recent_dir(pdir)
 
     print(f"[jsonl-manager] projects dir = {pdir}")
     print(f"[jsonl-manager] http://{args.host}:{args.port}")

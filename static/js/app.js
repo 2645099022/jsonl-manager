@@ -13,6 +13,8 @@
 const state = {
   projects: [],
   sessions: [],
+  projectsDir: null,
+  recentDirs: [],
   currentProject: null,
   currentSession: null,
   currentDetail: null,
@@ -94,6 +96,14 @@ const fmt = {
     const pad = n => String(n).padStart(2, '0');
     return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
   },
+  // 只取本地时间的 HH:MM, 与 fmt.ts 同一时区口径 (侧栏时间线用)
+  hm(t) {
+    if (!t) return '';
+    const d = typeof t === 'number' ? new Date(t * 1000) : new Date(t);
+    if (isNaN(d)) return '';
+    const pad = n => String(n).padStart(2, '0');
+    return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  },
   short(s, n = 80) {
     if (!s) return '';
     s = String(s).replace(/\s+/g, ' ').trim();
@@ -134,11 +144,56 @@ function renderText(text) {
 async function loadConfig() {
   try {
     const r = await fetchJson('/api/config');
-    const el = document.querySelector('.meta code.path');
-    if (el && r.projects_dir) el.textContent = r.projects_dir;
+    state.projectsDir = r.projects_dir || null;
+    state.recentDirs = r.recent_dirs || [];
+    renderDirSelect();
   } catch (err) {
     console.warn('Failed to load config', err);
   }
+}
+
+// 顶栏根目录下拉: 最近打开的目录 + "选择其它目录…"
+function renderDirSelect() {
+  const sel = $('#projects-dir-select');
+  if (!sel) return;
+  const dirs = state.recentDirs.slice();
+  if (state.projectsDir && !dirs.includes(state.projectsDir)) {
+    dirs.unshift(state.projectsDir);
+  }
+  sel.innerHTML = '';
+  for (const d of dirs) {
+    const opt = document.createElement('option');
+    opt.value = d;
+    opt.textContent = d;
+    if (d === state.projectsDir) opt.selected = true;
+    sel.appendChild(opt);
+  }
+  const other = document.createElement('option');
+  other.value = '__pick__';
+  other.textContent = '选择其它目录…';
+  sel.appendChild(other);
+}
+
+async function switchProjectsDir(dir) {
+  const payload = await fetchJson('/api/config/projects-dir', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projects_dir: dir }),
+  });
+  state.projectsDir = payload.projects_dir || dir;
+  state.recentDirs = payload.recent_dirs || state.recentDirs;
+  renderDirSelect();
+
+  // 切根目录 = 换了一套 projects/回收站/回档, 全量重载
+  state.currentProject = null;
+  state.currentSession = null;
+  state.currentDetail = null;
+  state.selectedBranch = null;
+  clearSessionDetail();
+  await loadRecycleSettings();
+  await loadRollbackStatus();
+  await loadProjects();
+  if (state.projects.length) await selectProject(state.projects[0].project_id);
 }
 
 async function loadProjects() {
@@ -784,7 +839,7 @@ function renderMainTimeline(root, detail, main) {
     if (n.role === 'assistant' && !isError) cls.push('is-asst');
     dot.className = cls.join(' ');
     const label = (n.text || '').replace(/\s+/g, ' ').trim().slice(0, 60) || `(${n.type})`;
-    const ts = (n.timestamp || '').slice(11, 16);
+    const ts = fmt.hm(n.timestamp);
     const prefix = isExtraError ? '⚠ ' : isExtra ? '↺ ' : '';
     dot.innerHTML = `
       <span class="tl-bullet"></span>
@@ -826,7 +881,7 @@ function renderMainTimeline(root, detail, main) {
         if (b.branch_id === state.selectedBranch) cls.push('active');
         card.className = cls.join(' ');
         const prefix = b.is_error ? '⚠ ' : '↺ ';
-        const ts = (b.ended_at || '').slice(11, 16);
+        const ts = fmt.hm(b.ended_at);
         card.innerHTML = `
           <div class="tl-rewind-title" title="${fmt.escape(b.title)}">${prefix}${fmt.escape(b.title)}</div>
           <div class="tl-rewind-stats">#${b.branch_id} · ${b.length} 独有节点 · ${ts}</div>`;
@@ -883,7 +938,7 @@ function renderRewindDetail(root, detail, main) {
       if (b.branch_id === sel.branch_id) cls.push('active');
       card.className = cls.join(' ');
       const prefix = b.is_error ? '⚠ ' : '↺ ';
-      const ts = (b.ended_at || '').slice(11, 16);
+      const ts = fmt.hm(b.ended_at);
       card.innerHTML = `
         <div class="tl-rewind-title" title="${fmt.escape(b.title)}">${prefix}${fmt.escape(b.title)}</div>
         <div class="tl-rewind-stats">#${b.branch_id} · ${b.length} 节点 · ${ts}</div>`;
@@ -1111,6 +1166,25 @@ $('#delete-confirm')?.addEventListener('click', (ev) => {
 
 $('#delete-dialog')?.addEventListener('close', () => {
   if (!state.deleteInFlight) state.pendingDeleteSession = null;
+});
+
+$('#projects-dir-select')?.addEventListener('change', (ev) => {
+  const val = ev.target.value;
+  if (val === '__pick__') {
+    const input = prompt('输入 projects 根目录的绝对路径:', state.projectsDir || '');
+    // 取消或空输入: 还原选中项, 不切换
+    if (!input || !input.trim()) { renderDirSelect(); return; }
+    switchProjectsDir(input.trim()).catch(err => {
+      alert(err.message || '切换目录失败');
+      renderDirSelect();
+    });
+    return;
+  }
+  if (val === state.projectsDir) return;
+  switchProjectsDir(val).catch(err => {
+    alert(err.message || '切换目录失败');
+    renderDirSelect();
+  });
 });
 
 $('#btn-refresh').addEventListener('click', async () => {

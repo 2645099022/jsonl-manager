@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Claude Code 会话管理</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}?v=search-opt-20260613">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}?v=dir-select-20260703">
 </head>
 <body>
   <header class="topbar">
@@ -14,7 +14,7 @@
     </div>
     <div class="meta">
       <span class="muted">projects:</span>
-      <code class="path">{{ projects_dir }}</code>
+      <select id="projects-dir-select" class="dir-select" title="切换 projects 根目录"></select>
       <button id="btn-refresh" class="btn-ghost" title="刷新">↻</button>
       <button id="btn-recycle-settings" class="btn-ghost recycle-settings-btn" title="回收站" aria-label="回收站">
         <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -133,6 +133,6 @@
     </form>
   </dialog>
 
-  <script src="{{ url_for('static', filename='js/app.js') }}?v=search-opt-20260613"></script>
+  <script src="{{ url_for('static', filename='js/app.js') }}?v=dir-select-20260703"></script>
 </body>
 </html>
