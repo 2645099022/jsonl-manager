@@ -1,0 +1,7 @@
+# 统一行尾为 LF, 避免 Windows 上 core.autocrlf 把已存的 LF 改写成 CRLF
+# (之前 vendor/marked.min.js, vendor/purify.min.js, static/css/app.css,
+#  templates/index.html 都有这个 warning)
+* text=auto eol=lf
+
+# vendor 第三方库不做行尾转换, 防止 CRLF 注入破坏压缩 JS 的词法
+static/vendor/*.js binary

@@ -15,6 +15,10 @@
     <div class="meta">
       <span class="muted">projects:</span>
       <select id="projects-dir-select" class="dir-select" title="切换 projects 根目录"></select>
+      <select id="md-renderer-select" class="dir-select" title="assistant 消息 markdown 渲染器">
+        <option value="lib">渲染器: 第三方库</option>
+        <option value="manual">渲染器: 手写</option>
+      </select>
       <button id="btn-refresh" class="btn-ghost" title="刷新">↻</button>
       <button id="btn-recycle-settings" class="btn-ghost recycle-settings-btn" title="回收站" aria-label="回收站">
         <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -133,6 +137,8 @@
     </form>
   </dialog>
 
-  <script src="{{ url_for('static', filename='js/app.js') }}?v=fts-index-20260703"></script>
+  <script src="{{ url_for('static', filename='vendor/marked.min.js') }}?v=md-20260704"></script>
+  <script src="{{ url_for('static', filename='vendor/purify.min.js') }}?v=md-20260704"></script>
+  <script src="{{ url_for('static', filename='js/app.js') }}?v=md-20260704"></script>
 </body>
 </html>
