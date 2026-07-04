@@ -70,6 +70,14 @@ class Node:
     is_command: bool = False
     is_tool_result: bool = False
     is_failed_retry: bool = False
+    # 系统注入到主线的"伪 user"节点细分:
+    # task-notification 是后台 subagent 跑完回传给主线程的完成通知 (非真人发言),
+    # caveat 是本地命令执行时客户端注入的说明. 二者 role 都是 user, 需单独识别.
+    is_task_notification: bool = False
+    subagent_id: str | None = None    # = task-id / agentId, 对应 subagents/agent-<id>.jsonl
+    subagent_name: str | None = None  # 从 <summary>Agent "xxx" finished</summary> 提取
+    subagent_status: str | None = None
+    is_caveat: bool = False
     model: str | None = None
     raw: dict = field(default_factory=dict)
 
@@ -90,6 +98,11 @@ class Node:
             "is_command": self.is_command,
             "is_tool_result": self.is_tool_result,
             "is_failed_retry": self.is_failed_retry,
+            "is_task_notification": self.is_task_notification,
+            "subagent_id": self.subagent_id,
+            "subagent_name": self.subagent_name,
+            "subagent_status": self.subagent_status,
+            "is_caveat": self.is_caveat,
             "model": self.model,
         }
 
@@ -131,6 +144,15 @@ class Branch:
 
 _COMMAND_RE = re.compile(r"<command-name>([^<]+)</command-name>")
 _LOCAL_CMD_RE = re.compile(r"<local-command-stdout>")
+# subagent 完成回传通知: 主线里 role=user 但正文以 <task-notification> 开头.
+_TASK_NOTIF_RE = re.compile(r"^\s*<task-notification>", re.IGNORECASE)
+_TASK_ID_RE = re.compile(r"<task-id>\s*([^<\s]+)\s*</task-id>", re.IGNORECASE)
+_TASK_STATUS_RE = re.compile(r"<status>\s*([^<]+?)\s*</status>", re.IGNORECASE)
+# <summary>Agent "xxx" finished</summary> - 优先取引号内的 agent 名字, 否则取整段 summary.
+_TASK_SUMMARY_RE = re.compile(r"<summary>\s*(.*?)\s*</summary>", re.IGNORECASE | re.DOTALL)
+_AGENT_NAME_RE = re.compile(r'Agent\s+"([^"]+)"')
+# 本地命令注入的说明 (isMeta=true), role 也是 user.
+_CAVEAT_RE = re.compile(r"<local-command-caveat>|^\s*Caveat:", re.IGNORECASE)
 
 
 def _extract_text(content: Any) -> tuple[str, list[dict], list[dict], bool]:
@@ -214,6 +236,26 @@ def _parse_record(record: dict) -> Node | None:
 
     is_command = bool(_COMMAND_RE.search(text)) if isinstance(text, str) else False
 
+    # 细分主线里的"伪 user"节点 (role=user 但非真人发言). tool_result 已由上面识别,
+    # 这里只看纯文本节点: task-notification (subagent 回传) 与 caveat (本地命令说明).
+    is_task_notification = False
+    subagent_id = subagent_name = subagent_status = None
+    is_caveat = False
+    if role == "user" and not is_tool_result and isinstance(text, str) and text:
+        if _TASK_NOTIF_RE.match(text):
+            is_task_notification = True
+            m_id = _TASK_ID_RE.search(text)
+            subagent_id = m_id.group(1) if m_id else None
+            m_st = _TASK_STATUS_RE.search(text)
+            subagent_status = m_st.group(1) if m_st else None
+            m_sum = _TASK_SUMMARY_RE.search(text)
+            if m_sum:
+                summary = m_sum.group(1)
+                m_name = _AGENT_NAME_RE.search(summary)
+                subagent_name = m_name.group(1) if m_name else summary[:80]
+        elif _CAVEAT_RE.search(text):
+            is_caveat = True
+
     return Node(
         uuid=uuid,
         parent_uuid=record.get("parentUuid"),
@@ -227,6 +269,11 @@ def _parse_record(record: dict) -> Node | None:
         is_sidechain=bool(record.get("isSidechain")),
         is_command=is_command,
         is_tool_result=is_tool_result,
+        is_task_notification=is_task_notification,
+        subagent_id=subagent_id,
+        subagent_name=subagent_name,
+        subagent_status=subagent_status,
+        is_caveat=is_caveat,
         model=model,
         raw=record,
     )
@@ -260,6 +307,7 @@ class Session:
     roots: list[str]
     branches: list[Branch]
     title: str
+    custom_title: str | None        # 来自 type=custom-title 记录, 优先于 title
     cwd: str | None
     git_branch: str | None
     versions: list[str]
@@ -276,6 +324,7 @@ class Session:
             "session_id": self.session_id,
             "project_id": self.project_id,
             "title": self.title,
+            "custom_title": self.custom_title,
             "file_size": self.file_size,
             "mtime": self.mtime,
             "node_count": len(self.nodes),
@@ -294,6 +343,7 @@ def parse_session_file(path: Path, project_id: str) -> Session:
     git_branch: str | None = None
     versions: list[str] = []
     last_record_uuid: str | None = None
+    custom_title: str | None = None  # 最后一条 type=custom-title 记录
 
     with path.open("r", encoding="utf-8", errors="replace") as fp:
         for line in fp:
@@ -312,6 +362,11 @@ def parse_session_file(path: Path, project_id: str) -> Session:
             v = record.get("version")
             if v and v not in versions:
                 versions.append(v)
+            # 用户自定义标题 (Claude Code /title 命令写入)
+            if record.get("type") == "custom-title":
+                ct = (record.get("customTitle") or "").strip()
+                if ct:
+                    custom_title = ct
 
             node = _parse_record(record)
             if node is None:
@@ -358,6 +413,7 @@ def parse_session_file(path: Path, project_id: str) -> Session:
         roots=roots,
         branches=branches,
         title=title,
+        custom_title=custom_title,
         cwd=cwd,
         git_branch=git_branch,
         versions=versions,
@@ -1627,3 +1683,33 @@ def load_session(project_id: str, session_id: str, projects_dir: Path = DEFAULT_
 def clear_session_cache() -> None:
     """测试或管理用: 清空会话缓存."""
     _SESSION_CACHE.clear()
+
+
+_AGENT_ID_RE = re.compile(r"^[0-9a-f]+$", re.IGNORECASE)
+
+
+def load_subagent_session(
+    project_id: str,
+    session_id: str,
+    agent_id: str,
+    projects_dir: Path = DEFAULT_PROJECTS_DIR,
+) -> Session | None:
+    """
+    加载某条主线 task-notification 对应的 subagent 完整对话.
+
+    文件布局: <projects_dir>/<project_id>/<session_id>/subagents/agent-<agent_id>.jsonl
+    (agent_id = 主线通知里的 <task-id>). 严格校验 session_id / agent_id 格式,
+    并确认最终路径落在 projects_dir 内, 防止路径穿越.
+    """
+    if not SESSION_FILE_RE.match(session_id) or not _AGENT_ID_RE.match(agent_id):
+        return None
+    base = (projects_dir / project_id / session_id / "subagents").resolve()
+    f = (base / f"agent-{agent_id}.jsonl").resolve()
+    try:
+        f.relative_to(projects_dir.resolve())
+    except (OSError, ValueError):
+        return None
+    if not f.is_file():
+        return None
+    # subagent 文件本身就是标准 jsonl 会话, 直接复用主解析器 (project_id 仅用于标注).
+    return parse_session_file(f, project_id)

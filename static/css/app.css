@@ -249,6 +249,10 @@ a { color: var(--accent); text-decoration: none; }
   text-overflow: ellipsis;
   margin-bottom: 2px;
 }
+/* 用户已 rename 的会话: 标题用暖青色区分, 不刺眼 */
+.list .item-title.renamed {
+  color: #73daca;
+}
 .list .item-sub {
   font-size: 11px;
   color: var(--text-dim);
@@ -528,6 +532,16 @@ a { color: var(--accent); text-decoration: none; }
   margin: 0;
   font-size: 16px;
   font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+/* rename 小图标: 暖青色, 不抢主标题视觉 */
+.session-header h1 .renamed-badge {
+  font-size: 12px;
+  color: #73daca;
+  opacity: 0.75;
+  cursor: default;
 }
 .session-header .meta-row {
   display: flex;
@@ -599,6 +613,14 @@ a { color: var(--accent); text-decoration: none; }
 }
 .msg-flag.fork { color: var(--rewind); border-color: rgba(255,158,100,.3); background: rgba(255,158,100,.08); }
 .msg-flag.cmd { color: var(--accent-2); border-color: rgba(187,154,247,.3); background: rgba(187,154,247,.08); }
+.msg-flag.subagent { color: var(--accent-2); border-color: rgba(187,154,247,.4); background: rgba(187,154,247,.12); font-weight: 600; }
+.msg-flag.caveat-flag { color: var(--text-muted); border-color: var(--border); background: rgba(138,147,166,.08); }
+
+/* subagent 回传通知: 非真人发言, 用紫色左边框区分真人 user (绿色) */
+.message.task-notification { border-left: 3px solid var(--accent-2); }
+.message.task-notification .msg-text { opacity: .75; font-size: 12.5px; }
+.msg-role.subagent { background: rgba(187,154,247,.15); color: var(--accent-2); }
+.message.caveat { opacity: .5; font-size: 12px; }
 
 .msg-text {
   font-size: 13.5px;
@@ -783,6 +805,71 @@ a { color: var(--accent); text-decoration: none; }
   opacity: .95;
 }
 .inline-fork-body .message.in-rewind { /* 已有 in-rewind class */ }
+
+/* subagent 完整对话折叠面板: 紫色变体, 复用 inline-fork 交互 */
+.inline-subagent {
+  max-width: 1000px;
+  margin: 4px auto 14px;
+  border: 1.5px solid rgba(187,154,247,.45);
+  border-radius: 12px;
+  background: rgba(187,154,247,.04);
+  overflow: hidden;
+}
+.inline-subagent > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 10px 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  user-select: none;
+  background: rgba(187,154,247,.09);
+  transition: background .12s;
+}
+.inline-subagent > summary::-webkit-details-marker { display: none; }
+.inline-subagent > summary:hover { background: rgba(187,154,247,.15); }
+.inline-subagent[open] > summary { border-bottom: 1px dashed rgba(187,154,247,.3); }
+.inline-subagent .caret {
+  display: inline-block;
+  transition: transform .15s;
+  color: var(--accent-2);
+  font-size: 11px;
+}
+.inline-subagent[open] > summary .caret { transform: rotate(90deg); }
+.inline-subagent .badge-subagent {
+  background: var(--accent-2);
+  color: #1a1a1a;
+  padding: 2px 9px;
+  border-radius: 4px;
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: .3px;
+}
+.inline-subagent .meta {
+  color: var(--accent-2);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.inline-subagent .meta code { font-size: 10.5px; opacity: .8; }
+.inline-subagent .hint {
+  color: var(--text-muted);
+  font-size: 11.5px;
+  margin-left: auto;
+}
+.inline-subagent-body {
+  padding: 8px 10px 14px;
+}
+.inline-subagent-body .message {
+  margin: 6px 4px;
+  padding: 9px 13px;
+  font-size: 13px;
+  opacity: .95;
+}
 
 /* 失败请求消息样式 */
 .message.failed {

@@ -690,6 +690,7 @@ function renderSessions() {
   const filter = ($('#session-filter').value || '').toLowerCase();
   const items = state.sessions.filter(s =>
     !filter ||
+    (s.custom_title || '').toLowerCase().includes(filter) ||
     (s.title || '').toLowerCase().includes(filter) ||
     (s.session_id || '').toLowerCase().includes(filter)
   );
@@ -704,8 +705,13 @@ function renderSessions() {
     li.dataset.sid = s.session_id;
     const rewind = s.has_rewind
       ? `<span class="badge rewind" title="该会话存在 rewind 分叉">↺ rewind</span>` : '';
+    // 有用户自定义标题时优先显示, 并加 renamed 样式标记
+    const displayTitle = s.custom_title || s.title;
+    const renamedClass = s.custom_title ? ' renamed' : '';
+    const renamedAttr = s.custom_title
+      ? ` title="${fmt.escape(s.custom_title)}"` : ` title="${fmt.escape(s.title)}"`;
     li.innerHTML = `
-      <div class="item-title" title="${fmt.escape(s.title)}">${fmt.escape(s.title)}</div>
+      <div class="item-title${renamedClass}"${renamedAttr}>${fmt.escape(displayTitle)}</div>
       <div class="item-sub">
         <span class="badge">${s.message_count} 消息</span>
         <span class="badge">${s.branch_count} 分支</span>
@@ -810,13 +816,14 @@ function renderMainTimeline(root, detail, main) {
   const mainAnchors = (detail.nodes || []).filter(n => {
     if (n.is_meta) return false;
     if (n.is_tool_result) return false;
+    if (n.is_task_notification) return false;  // subagent 回传通知, 非真人发言, 不做时间线锚点
     if (n.role === 'user') return true;
     if (n.role === 'assistant' && (n.is_failed_retry || (n.text || '').startsWith('API Error'))) return true;
     if (forkUuids.has(n.uuid)) return true;
     return false;
   });
   const extraAnchors = (detail.extra_anchors || []).filter(n => {
-    if (n.is_meta || n.is_tool_result) return false;
+    if (n.is_meta || n.is_tool_result || n.is_task_notification) return false;
     return n.role === 'user' || n.role === 'assistant';
   });
   const anchorNodes = [...mainAnchors, ...extraAnchors].sort((a, b) =>
@@ -968,8 +975,11 @@ function renderSessionHeader() {
       ? '<span style="color:var(--main)">● 主线</span>'
       : '<span style="color:var(--rewind)">↺ 回滚分支</span>') + ` #${d.selected_branch.branch_id}`
     : '';
+  const headerTitle = d.custom_title || d.title;
+  const renamedMark = d.custom_title
+    ? `<span class="renamed-badge" title="已重命名: ${fmt.escape(d.custom_title)}">✎</span>` : '';
   h.innerHTML = `
-    <h1>${fmt.escape(d.title || '(无标题)')}</h1>
+    <h1>${fmt.escape(headerTitle || '(无标题)')}${renamedMark}</h1>
     <div class="meta-row">
       <span>会话 <code>${fmt.escape(d.session_id)}</code></span>
       <span>cwd <code>${fmt.escape(d.cwd || '-')}</code></span>
@@ -1056,6 +1066,8 @@ function renderMessage(n, forkSet, opts = {}) {
   if (n.is_tool_result) cls.push('tool-result');
   if (n.is_meta) cls.push('meta');
   if (n.is_failed_retry) cls.push('failed');
+  if (n.is_task_notification) cls.push('task-notification');
+  if (n.is_caveat) cls.push('caveat');
   if (forkSet.has(n.uuid)) cls.push('fork-point');
   if (opts.isInRewind) cls.push('in-rewind');
   el.className = cls.join(' ');
@@ -1064,13 +1076,23 @@ function renderMessage(n, forkSet, opts = {}) {
   const flags = [];
   if (forkSet.has(n.uuid)) flags.push('<span class="msg-flag fork" title="此节点产生了 rewind 分叉">⎇ rewind 起点</span>');
   if (n.is_failed_retry) flags.push('<span class="msg-flag failed" title="API 错误后被自动重试">⚠ 失败请求</span>');
-  if (n.is_meta) flags.push('<span class="msg-flag">meta</span>');
+  if (n.is_task_notification) {
+    const nm = n.subagent_name ? `「${fmt.escape(n.subagent_name)}」` : '';
+    const st = n.subagent_status ? ` · ${fmt.escape(n.subagent_status)}` : '';
+    flags.push(`<span class="msg-flag subagent" title="后台 subagent 完成回传的通知, 非真人发言">↩ subagent${nm}${st}</span>`);
+  }
+  if (n.is_caveat) flags.push('<span class="msg-flag caveat-flag" title="本地命令执行时客户端注入的说明, 非真人发言">caveat</span>');
+  if (n.is_meta && !n.is_caveat) flags.push('<span class="msg-flag">meta</span>');
   if (n.is_sidechain) flags.push('<span class="msg-flag">sidechain</span>');
   if (n.is_command) flags.push('<span class="msg-flag cmd">命令</span>');
 
-  const roleClass = n.is_tool_result ? 'tool' : (role === 'assistant' ? 'assistant' :
-                    role === 'user' ? 'user' : 'system');
-  const roleText = n.is_tool_result ? 'tool' : (role || '?');
+  const roleClass = n.is_tool_result ? 'tool'
+                  : n.is_task_notification ? 'subagent'
+                  : (role === 'assistant' ? 'assistant' :
+                     role === 'user' ? 'user' : 'system');
+  const roleText = n.is_tool_result ? 'tool'
+                 : n.is_task_notification ? 'subagent'
+                 : (role || '?');
 
   let body = '';
   if (n.text) body += `<div class="msg-text">${renderText(n.text)}</div>`;
@@ -1100,7 +1122,61 @@ function renderMessage(n, forkSet, opts = {}) {
       <span class="msg-flags">${flags.join('')}</span>
     </div>
     ${body}`;
+
+  // task-notification: 挂一个懒加载折叠面板, 点开才拉取该 subagent 的完整对话
+  if (n.is_task_notification && n.subagent_id) {
+    el.appendChild(renderSubagentSection(n.subagent_id, n.subagent_name));
+  }
   return el;
+}
+
+// subagent 完整对话的 inline 懒加载折叠面板 (复用 rewind 折叠的交互模式)
+function renderSubagentSection(agentId, agentName) {
+  const wrap = document.createElement('details');
+  wrap.className = 'inline-subagent';
+  const summary = document.createElement('summary');
+  const nm = agentName ? `「${fmt.escape(agentName)}」` : '';
+  summary.innerHTML = `
+    <span class="caret">▸</span>
+    <span class="badge-subagent">↩ subagent 完整对话</span>
+    <span class="meta">${nm}<code>${fmt.escape(agentId)}</code></span>
+    <span class="hint">点击展开该后台 agent 的全部消息</span>`;
+  wrap.appendChild(summary);
+
+  const body = document.createElement('div');
+  body.className = 'inline-subagent-body';
+  body.innerHTML = '<div class="empty-state">点击上方展开加载...</div>';
+  wrap.appendChild(body);
+
+  let loaded = false;
+  wrap.addEventListener('toggle', async () => {
+    if (!wrap.open || loaded) return;
+    loaded = true;
+    body.innerHTML = '<div class="empty-state">加载中...</div>';
+    try {
+      const detail = await loadSubagentDetail(
+        state.currentProject, state.currentSession, agentId
+      );
+      body.innerHTML = '';
+      if (!detail.nodes?.length) {
+        body.innerHTML = '<div class="empty-state">该 subagent 无消息</div>';
+        return;
+      }
+      for (const sn of detail.nodes) {
+        body.appendChild(renderMessage(sn, new Set(), { isInRewind: true }));
+      }
+    } catch (err) {
+      loaded = false;  // 允许重试
+      body.innerHTML = `<div class="empty-state">加载失败: ${fmt.escape(err.message || String(err))}</div>`;
+    }
+  });
+  return wrap;
+}
+
+async function loadSubagentDetail(pid, sid, agentId) {
+  const url = `/api/projects/${encodeURIComponent(pid)}/sessions/${encodeURIComponent(sid)}` +
+              `/subagents/${encodeURIComponent(agentId)}`;
+  return fetchJson(url);
 }
 
 // ---------------------------------------------------------------- 初始化
