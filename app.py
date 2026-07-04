@@ -276,6 +276,8 @@ def api_session_detail(project_id: str, session_id: str):
                         "is_tool_result": an.is_tool_result,
                         "is_command": an.is_command,
                         "is_sidechain": an.is_sidechain,
+                        "is_task_notification": an.is_task_notification,
+                        "is_caveat": an.is_caveat,
                     }
                 )
 
@@ -304,6 +306,28 @@ def api_session_raw(project_id: str, session_id: str):
     if not f.exists():
         abort(404)
     return f.read_text(encoding="utf-8", errors="replace"), 200, {"Content-Type": "application/jsonl; charset=utf-8"}
+
+
+@app.route("/api/projects/<project_id>/sessions/<session_id>/subagents/<agent_id>")
+def api_subagent_detail(project_id: str, session_id: str, agent_id: str):
+    """返回某条 task-notification 对应 subagent 的完整对话节点 (按 jsonl 出现顺序)."""
+    session = session_parser.load_subagent_session(
+        project_id, session_id, agent_id, _projects_dir()
+    )
+    if session is None:
+        abort(404)
+    # subagent 会话通常是线性的, 直接按解析顺序 (roots + children 的先后) 平铺.
+    # 主线只需时间顺序展示, 不需要分支逻辑, 因此按 timestamp 排序返回全部节点.
+    nodes = sorted(session.nodes.values(), key=lambda n: n.timestamp or "")
+    return jsonify(
+        {
+            "project_id": project_id,
+            "session_id": session_id,
+            "agent_id": agent_id,
+            "title": session.title,
+            "nodes": [n.to_dict() for n in nodes],
+        }
+    )
 
 
 @app.route("/api/projects/<project_id>/sessions/<session_id>/tree")

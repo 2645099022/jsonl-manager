@@ -78,6 +78,9 @@ class Node:
     subagent_name: str | None = None  # 从 <summary>Agent "xxx" finished</summary> 提取
     subagent_status: str | None = None
     is_caveat: bool = False
+    # /context 命令输出: isMeta=true 的 user 节点, 正文是 "## Context Usage" markdown 表格.
+    # 无 <command-name> 包裹, 需按正文识别, 供前端不压暗 + 渲染表格.
+    is_context_output: bool = False
     model: str | None = None
     raw: dict = field(default_factory=dict)
 
@@ -103,6 +106,7 @@ class Node:
             "subagent_name": self.subagent_name,
             "subagent_status": self.subagent_status,
             "is_caveat": self.is_caveat,
+            "is_context_output": self.is_context_output,
             "model": self.model,
         }
 
@@ -153,6 +157,8 @@ _TASK_SUMMARY_RE = re.compile(r"<summary>\s*(.*?)\s*</summary>", re.IGNORECASE |
 _AGENT_NAME_RE = re.compile(r'Agent\s+"([^"]+)"')
 # 本地命令注入的说明 (isMeta=true), role 也是 user.
 _CAVEAT_RE = re.compile(r"<local-command-caveat>|^\s*Caveat:", re.IGNORECASE)
+# /context 命令输出: isMeta=true 的 user 节点, 正文以 "## Context Usage" 开头.
+_CONTEXT_OUTPUT_RE = re.compile(r"^\s*##\s+Context Usage", re.IGNORECASE)
 
 
 def _extract_text(content: Any) -> tuple[str, list[dict], list[dict], bool]:
@@ -241,6 +247,7 @@ def _parse_record(record: dict) -> Node | None:
     is_task_notification = False
     subagent_id = subagent_name = subagent_status = None
     is_caveat = False
+    is_context_output = False
     if role == "user" and not is_tool_result and isinstance(text, str) and text:
         if _TASK_NOTIF_RE.match(text):
             is_task_notification = True
@@ -253,6 +260,8 @@ def _parse_record(record: dict) -> Node | None:
                 summary = m_sum.group(1)
                 m_name = _AGENT_NAME_RE.search(summary)
                 subagent_name = m_name.group(1) if m_name else summary[:80]
+        elif _CONTEXT_OUTPUT_RE.match(text):
+            is_context_output = True
         elif _CAVEAT_RE.search(text):
             is_caveat = True
 
@@ -274,6 +283,7 @@ def _parse_record(record: dict) -> Node | None:
         subagent_name=subagent_name,
         subagent_status=subagent_status,
         is_caveat=is_caveat,
+        is_context_output=is_context_output,
         model=model,
         raw=record,
     )
@@ -821,6 +831,17 @@ def _build_branches(
         if leaf != main_leaf:
             if not _has_branch_response_evidence(path, main_set, nodes):
                 continue
+            # rewind 只能由 user 发起: 分支独有段的第一个节点必须是真实用户消息
+            # (用户 rewind 后重发的那句输入). 若独有段以 assistant 开头, 那不是真实
+            # 分叉, 而是同一条 assistant 响应被 jsonl 拆成多分片后, 因中间夹了带真实
+            # 后续子节点的 tool_result 导致 _merge_assistant_msgid_splits 中断合并、
+            # 遗留下来的孤立分片 (通常只含一个 tool_use, 无文本无子孙). 跳过它,
+            # 不伪造成 rewind 分支。tool_result 虽也是 type=user 但同理不算 rewind 起点。
+            unique_first = next((u for u in path if u not in main_set), None)
+            if unique_first is not None:
+                fn = nodes[unique_first]
+                if fn.type != "user" or fn.is_tool_result:
+                    continue
             for u in reversed(path):
                 if u in main_set and len(children.get(u, [])) > 1:
                     fork_from = u
