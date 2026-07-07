@@ -746,6 +746,66 @@ function scrollMessageToTop(uuid, retry = 0) {
   });
 }
 
+// ---------------------------------------------------------------- 滚动位置追踪: 同步高亮时间轴当前节点
+let _scrollTrackCleanup = null;
+
+function initScrollTracker() {
+  // 清理上一次绑定
+  if (_scrollTrackCleanup) { _scrollTrackCleanup(); _scrollTrackCleanup = null; }
+
+  const msgContainer = $('#messages');
+  if (!msgContainer) return;
+
+  // 收集时间轴上所有带 uuid 的节点
+  const tlNodes = Array.from($$('#branch-tree .tl-node[data-uuid]'));
+  if (!tlNodes.length) return;
+
+  const uuidSet = new Set(tlNodes.map(n => n.dataset.uuid));
+
+  // 消息区中属于时间轴锚点的元素 (按 DOM 顺序 = 时间顺序)
+  const anchorEls = Array.from($$('#messages [data-uuid]'))
+    .filter(el => uuidSet.has(el.dataset.uuid));
+  if (!anchorEls.length) return;
+
+  let currentActive = null;
+
+  function updateActive() {
+    const cRect = msgContainer.getBoundingClientRect();
+    // 快照线: 距容器顶部 31% 处; 最后一条越过此线的锚点即为"当前"
+    const snapLine = cRect.top + cRect.height * 0.31;
+
+    let activeUuid = null;
+    for (const el of anchorEls) {
+      if (el.getBoundingClientRect().top <= snapLine) activeUuid = el.dataset.uuid;
+    }
+
+    if (activeUuid === currentActive) return;
+    currentActive = activeUuid;
+
+    // 切换高亮
+    for (const node of tlNodes) {
+      node.classList.toggle('tl-active', node.dataset.uuid === activeUuid);
+    }
+
+    // 如果活跃节点不在时间轴可视范围内则自动滚入
+    if (activeUuid) {
+      const activeNode = tlNodes.find(n => n.dataset.uuid === activeUuid);
+      if (activeNode) {
+        const tree = $('#branch-tree');
+        const nRect = activeNode.getBoundingClientRect();
+        const tRect = tree.getBoundingClientRect();
+        if (nRect.top < tRect.top + 40 || nRect.bottom > tRect.bottom - 40) {
+          activeNode.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        }
+      }
+    }
+  }
+
+  updateActive(); // 初始化时立即同步一次
+  msgContainer.addEventListener('scroll', updateActive, { passive: true });
+  _scrollTrackCleanup = () => msgContainer.removeEventListener('scroll', updateActive);
+}
+
 // ---------------------------------------------------------------- 渲染: 项目
 function renderProjects() {
   const ul = $('#project-list');
@@ -1052,6 +1112,7 @@ function renderMainTimeline(root, detail, main) {
     if (isExtraError) cls.push('is-extra-error');
     if (n.role === 'assistant' && !isError) cls.push('is-asst');
     dot.className = cls.join(' ');
+    if (n.uuid) dot.dataset.uuid = n.uuid;
     const label = (n.text || '').replace(/\s+/g, ' ').trim().slice(0, 60) || `(${n.type})`;
     const ts = fmt.hm(n.timestamp);
     const prefix = isExtraError ? '⚠ ' : isExtra ? '↺ ' : '';
@@ -1217,6 +1278,9 @@ function renderMessages() {
       root.appendChild(renderForkSection(n.uuid, oldBranches));
     }
   }
+
+  // 消息渲染完毕后初始化滚动追踪 (requestAnimationFrame 保证 DOM 已更新)
+  requestAnimationFrame(() => initScrollTracker());
 }
 
 function renderForkSection(forkUuid, oldBranches) {
@@ -1307,9 +1371,14 @@ function renderMessage(n, forkSet, opts = {}) {
 
   // assistant 消息渲染 markdown (可切原文); context 输出走专用渲染器;
   // user/tool_result 等保持纯文本 (它们常含代码/日志, markdown 会失真).
+  // task_result: subagent 通知里 <result> 块的内容, 本身是 markdown, 单独走渲染器.
+  // 有 task_result 时隐藏原始 XML wrapper (信息已由 header flags 展示), 只渲染 result 段.
   const mdApplies = role === 'assistant' && !n.is_task_notification && !!n.text;
+  const hasResult = !!(n.is_task_notification && n.task_result);
   let body = '';
-  if (n.text) {
+  if (hasResult) {
+    body += `<div class="msg-text md-body task-result-body">${renderMarkdown(n.task_result)}</div>`;
+  } else if (n.text) {
     let rendered;
     if (n.is_context_output) rendered = renderContextMarkdown(n.text);
     else if (mdApplies) rendered = renderMarkdown(n.text);
@@ -1336,7 +1405,7 @@ function renderMessage(n, forkSet, opts = {}) {
   }
 
   // markdown 消息给个 原文/渲染 切换按钮
-  const toggleBtn = mdApplies
+  const toggleBtn = (mdApplies || hasResult)
     ? '<button class="md-toggle" type="button" title="切换 原文 / 渲染">原文</button>'
     : '';
 
@@ -1351,21 +1420,25 @@ function renderMessage(n, forkSet, opts = {}) {
     ${body}`;
 
   // 原文/渲染切换: 点按钮在 renderMarkdown 结果与转义纯文本间切换
-  if (mdApplies) {
+  // hasResult 时渲染态只显示 task_result markdown, 原文态恢复完整 XML (n.text)
+  if (mdApplies || hasResult) {
     const btn = el.querySelector('.md-toggle');
     const textEl = el.querySelector('.msg-text');
+    const rawSource = n.text;
+    const mdSource = hasResult ? n.task_result : n.text;
     let raw = false;
     btn.addEventListener('click', () => {
       raw = !raw;
       if (raw) {
-        textEl.classList.remove('md-body');
+        textEl.classList.remove('md-body', 'task-result-body');
         textEl.classList.add('raw-body');
-        textEl.textContent = n.text;  // textContent 天然转义, 保原样
+        textEl.textContent = rawSource;  // textContent 天然转义, 保原样
         btn.textContent = '渲染';
       } else {
         textEl.classList.remove('raw-body');
         textEl.classList.add('md-body');
-        textEl.innerHTML = renderMarkdown(n.text);
+        if (hasResult) textEl.classList.add('task-result-body');
+        textEl.innerHTML = renderMarkdown(mdSource);
         btn.textContent = '原文';
       }
     });
@@ -1388,7 +1461,7 @@ function renderSubagentSection(agentId, agentName) {
     <span class="caret">▸</span>
     <span class="badge-subagent">↩ subagent 完整对话</span>
     <span class="meta">${nm}<code>${fmt.escape(agentId)}</code></span>
-    <span class="hint">点击展开该后台 agent 的全部消息</span>`;
+    `;
   wrap.appendChild(summary);
 
   const body = document.createElement('div');

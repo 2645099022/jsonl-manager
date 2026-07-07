@@ -77,6 +77,7 @@ class Node:
     subagent_id: str | None = None    # = task-id / agentId, 对应 subagents/agent-<id>.jsonl
     subagent_name: str | None = None  # 从 <summary>Agent "xxx" finished</summary> 提取
     subagent_status: str | None = None
+    task_result: str | None = None   # <result> 块内文本, 本身是 markdown, 供前端单独渲染
     is_caveat: bool = False
     # /context 命令输出: isMeta=true 的 user 节点, 正文是 "## Context Usage" markdown 表格.
     # 无 <command-name> 包裹, 需按正文识别, 供前端不压暗 + 渲染表格.
@@ -105,6 +106,7 @@ class Node:
             "subagent_id": self.subagent_id,
             "subagent_name": self.subagent_name,
             "subagent_status": self.subagent_status,
+            "task_result": self.task_result,
             "is_caveat": self.is_caveat,
             "is_context_output": self.is_context_output,
             "model": self.model,
@@ -155,6 +157,9 @@ _TASK_STATUS_RE = re.compile(r"<status>\s*([^<]+?)\s*</status>", re.IGNORECASE)
 # <summary>Agent "xxx" finished</summary> - 优先取引号内的 agent 名字, 否则取整段 summary.
 _TASK_SUMMARY_RE = re.compile(r"<summary>\s*(.*?)\s*</summary>", re.IGNORECASE | re.DOTALL)
 _AGENT_NAME_RE = re.compile(r'Agent\s+"([^"]+)"')
+# <result>...</result> 是 subagent 回传的正文, 本身是 markdown, 需单独抽出供前端走 markdown 渲染
+# (通知外层还夹着 <task-id>/<status> 等标签, 不能直接把整段 text 当 markdown 喂给渲染器).
+_TASK_RESULT_RE = re.compile(r"<result>\s*(.*?)\s*</result>", re.IGNORECASE | re.DOTALL)
 # 本地命令注入的说明 (isMeta=true), role 也是 user.
 _CAVEAT_RE = re.compile(r"<local-command-caveat>|^\s*Caveat:", re.IGNORECASE)
 # /context 命令输出: isMeta=true 的 user 节点, 正文以 "## Context Usage" 开头.
@@ -245,7 +250,7 @@ def _parse_record(record: dict) -> Node | None:
     # 细分主线里的"伪 user"节点 (role=user 但非真人发言). tool_result 已由上面识别,
     # 这里只看纯文本节点: task-notification (subagent 回传) 与 caveat (本地命令说明).
     is_task_notification = False
-    subagent_id = subagent_name = subagent_status = None
+    subagent_id = subagent_name = subagent_status = task_result = None
     is_caveat = False
     is_context_output = False
     if role == "user" and not is_tool_result and isinstance(text, str) and text:
@@ -260,6 +265,8 @@ def _parse_record(record: dict) -> Node | None:
                 summary = m_sum.group(1)
                 m_name = _AGENT_NAME_RE.search(summary)
                 subagent_name = m_name.group(1) if m_name else summary[:80]
+            m_res = _TASK_RESULT_RE.search(text)
+            task_result = m_res.group(1) if m_res else None
         elif _CONTEXT_OUTPUT_RE.match(text):
             is_context_output = True
         elif _CAVEAT_RE.search(text):
@@ -282,6 +289,7 @@ def _parse_record(record: dict) -> Node | None:
         subagent_id=subagent_id,
         subagent_name=subagent_name,
         subagent_status=subagent_status,
+        task_result=task_result if is_task_notification else None,
         is_caveat=is_caveat,
         is_context_output=is_context_output,
         model=model,

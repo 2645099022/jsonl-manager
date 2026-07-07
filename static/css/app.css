@@ -306,8 +306,9 @@ a { color: var(--accent); text-decoration: none; }
 .session-action {
   width: 24px;
   height: 24px;
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
@@ -619,6 +620,8 @@ a { color: var(--accent); text-decoration: none; }
 /* subagent 回传通知: 非真人发言, 用紫色左边框区分真人 user (绿色) */
 .message.task-notification { border-left: 3px solid var(--accent-2); }
 .message.task-notification .msg-text { opacity: .75; font-size: 12.5px; }
+/* task_result 区块是 markdown 报告正文, 不压暗, 用正常尺寸展示 */
+.message.task-notification .msg-text.task-result-body { opacity: 1; font-size: 13px; }
 .msg-role.subagent { background: rgba(187,154,247,.15); color: var(--accent-2); }
 .message.caveat { opacity: .5; font-size: 12px; }
 
@@ -694,14 +697,14 @@ a { color: var(--accent); text-decoration: none; }
 /* 表格: 手写版输出 .md-table, 第三方库(marked) 输出裸 <table>,
    都在 .md-body 容器内, 故同时挂两种选择器 */
 .md-body table, .md-table {
-  border-collapse: collapse; margin: 6px 0 12px; font-size: 12.5px;
+  border-collapse: collapse; margin: 6px 0 12px; font-size: 13px;
   width: auto; max-width: 100%;
 }
 .md-body table th, .md-body table td, .md-table th, .md-table td {
   border: 1px solid var(--border); padding: 4px 10px; text-align: left;
 }
 .md-body table th, .md-table th { background: var(--bg-elev); color: var(--text); font-weight: 600; }
-.md-body table td, .md-table td { color: var(--text-dim); }
+.md-body table td, .md-table td { color: var(--text); }
 .md-body table tr:nth-child(even) td, .md-table tr:nth-child(even) td { background: rgba(255,255,255,.015); }
 
 /* 原文/渲染 切换按钮 */
@@ -1137,6 +1140,27 @@ a { color: var(--accent); text-decoration: none; }
   flex: 1;
 }
 .tl-node:hover .tl-label { color: var(--text); }
+
+/* 滚动位置当前节点高亮 */
+.tl-node.tl-active {
+  background: rgba(122, 162, 247, 0.10);
+}
+.tl-node.tl-active .tl-bullet {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(122, 162, 247, .28);
+}
+.tl-node.tl-active .tl-label {
+  color: var(--accent);
+  font-weight: 500;
+}
+.tl-node.tl-active.is-fork .tl-bullet {
+  border-color: var(--rewind);
+  box-shadow: 0 0 0 3px rgba(255,158,100,.28);
+}
+.tl-node.tl-active.is-error .tl-bullet {
+  border-color: var(--error);
+  box-shadow: 0 0 0 3px rgba(247,118,142,.28);
+}
 
 /* 时间线上的 rewind 折叠组 */
 .tl-rewind-group {
